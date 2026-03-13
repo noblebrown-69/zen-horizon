@@ -5,7 +5,7 @@ A portable, old-school C++ application that mirrors the HTML version of the Zen 
 ## Features
 
 - Fullscreen dashboard with Japanese art backgrounds that cycle every 5 minutes
-- Live stock prices for OKLO, PLTR, CNXC, ACN from Finnhub API
+- Live stock prices from Finnhub API
 - Rotating inspirational quotes in Japanese font
 - 65 falling sakura particles for ambiance
 - Neon glow effect on the title "禅の地平線"
