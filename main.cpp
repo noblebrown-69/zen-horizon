@@ -11,6 +11,10 @@
 #include <iomanip>
 #include <ctime>
 #include <cmath>
+#include <fstream>
+#include <cstdio>
+#include <algorithm>
+#include <cctype>
 #include "json.hpp"
 
 // WHAT: Constants define the application's core settings like window size, timing, and API details.
@@ -45,11 +49,12 @@ const std::vector<std::string> QUOTES = {
 };
 
 // WHAT: Stock struct holds data for each stock symbol.
-// WHY: Simple data structure to store price and change percentage.
+// WHY: Simple data structure to store price and change percentage, with validity flag for null-safe rendering.
 struct Stock {
     std::string symbol;
     double price;
     double change;
+    bool valid;
 };
 
 // WHAT: WeatherDay struct holds daily weather data.
@@ -90,6 +95,27 @@ bool isFullscreen = true;
 float bgAlpha = 1.0f;
 int bgFadeDirection = 0;
 
+// WHAT: Config variables for persistent customization.
+// WHY: Allows users to personalize stocks and weather location without code changes.
+std::vector<std::string> configStocks = {"SPY", "QQQ", "VOO"}; // Default neutral symbols
+std::string configZip = "85001"; // Default Phoenix zip
+double configLat = 33.4484; // Default Phoenix
+double configLon = -112.0740;
+
+// Forward declarations: Essential for C++ compilation order - declare before use to enable modular code structure.
+// WHY: C++ requires declarations before calls; forward declares allow logical grouping without reordering definitions.
+// This teaches clean architecture: separate interface (declarations) from implementation (definitions) for maintainability.
+// Apple-level UX: Native zenity dialogs provide polished, system-integrated input without console hacks - professional feel.
+// Config flow: loadConfig() persists settings; saveConfig() writes JSON; fetchCoords() geocodes; fetchStocks/fetchWeather() refresh data.
+// Zenity parsing: popen() spawns child process, fgets() reads stdout, trim whitespace - teaches Unix IPC fundamentals.
+void fetchStocks();
+void fetchWeather();
+void loadConfig();
+void saveConfig();
+void fetchCoords(const std::string& zip);
+void editStocks();
+void editWeather();
+
 // WHAT: WriteCallback function handles data received from libcurl.
 // WHY: libcurl requires a callback to write response data into a string.
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) {
@@ -98,11 +124,148 @@ size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* s) 
     return newLength;
 }
 
+// WHAT: loadConfig loads user preferences from config.json, creating defaults if missing.
+// WHY: Config-first design teaches JSON persistence: load/create structured data for app state, ensuring defaults exist.
+void loadConfig() {
+    std::ifstream file("config.json");
+    if (file.is_open()) {
+        nlohmann::json j;
+        file >> j;
+        if (j.contains("stocks")) configStocks = j["stocks"];
+        else configStocks = {"SPY", "QQQ", "VOO"}; // Default neutral symbols
+        if (j.contains("zip")) configZip = j["zip"];
+        else configZip = "85001"; // Default Phoenix zip
+        // Lat/lon will be fetched from zip
+    } else {
+        // Create default config if missing
+        configStocks = {"SPY", "QQQ", "VOO"};
+        configZip = "85001";
+        saveConfig();
+    }
+    // Fetch coords from zip on load
+    if (!configZip.empty()) fetchCoords(configZip);
+}
+
+// WHAT: saveConfig saves user preferences to config.json.
+// WHY: Writes app state to disk, enabling persistence across runs (teach JSON serialization).
+void saveConfig() {
+    nlohmann::json j;
+    j["stocks"] = configStocks;
+    j["zip"] = configZip;
+    j["lat"] = configLat;
+    j["lon"] = configLon;
+    std::ofstream file("config.json");
+    file << j.dump(4);
+}
+
+// WHAT: editStocks spawns zenity dialog for stock input, teaching Unix child process fundamentals.
+// WHY: popen() creates pipe to zenity child process, allowing reading stdout for user input.
+// Heavy comments: Builds command with --title for native window title, --entry-text pre-fills current stocks.
+// popen("r") opens read pipe to child stdout; fgets() reads output line; trim handles newlines/whitespace.
+// Parses comma-separated with getline, erases spaces, auto-uppercase with std::transform for consistency (teaches C++ string manipulation).
+// Uppercase conversion: Finnhub API requires uppercase symbols; prevents user errors and ensures API compatibility.
+// Updates configStocks, saves JSON, refreshes live data. If canceled (empty), skips - teaches robust input handling.
+// Apple-level UX: Native dialog feels integrated, no console clutter, instant feedback.
+void editStocks() {
+    std::string cmd = "zenity --entry --title=\"Stocks\" --text=\"Enter comma-separated stock symbols:\" --entry-text=\"";
+    for (size_t i = 0; i < configStocks.size(); ++i) {
+        if (i > 0) cmd += ",";
+        cmd += configStocks[i];
+    }
+    cmd += "\"";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (pipe) {
+        char buffer[256];
+        if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            std::string input = buffer;
+            input.erase(input.find_last_not_of("\n\r \t") + 1); // Trim whitespace and newlines
+            if (!input.empty()) {
+                configStocks.clear();
+                std::stringstream ss(input);
+                std::string token;
+                while (std::getline(ss, token, ',')) {
+                    token.erase(0, token.find_first_not_of(" \t"));
+                    token.erase(token.find_last_not_of(" \t") + 1);
+                    if (!token.empty()) {
+                        // Auto-uppercase: Convert to upper case for API compatibility (teaches std::transform with ::toupper).
+                        // Finnhub requires uppercase symbols; this prevents API errors and user frustration.
+                        std::transform(token.begin(), token.end(), token.begin(), ::toupper);
+                        configStocks.push_back(token);
+                    }
+                }
+                if (configStocks.empty()) configStocks = {"SPY", "QQQ", "VOO"};
+                saveConfig();
+                fetchStocks();
+            }
+        }
+        pclose(pipe);
+    }
+}
+
+// WHAT: editWeather spawns zenity dialog for zip input, teaching Unix child process fundamentals.
+// WHY: popen() pipes to zenity child, reads stdout for zip code input.
+// Heavy comments: --title "Weather" for native window branding, --entry-text pre-fills current zip.
+// fgets() captures user input; trim removes artifacts; updates configZip, geocodes to lat/lon, saves JSON, refreshes weather.
+// Teaches integrated flow: zip → coords → API call, all triggered by native dialog.
+// Apple-level UX: Modal dialog blocks for input, returns focus seamlessly, no terminal disruption.
+void editWeather() {
+    std::string cmd = "zenity --entry --title=\"Weather\" --text=\"Enter US zip code:\" --entry-text=\"" + configZip + "\"";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (pipe) {
+        char buffer[256];
+        if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            std::string input = buffer;
+            input.erase(input.find_last_not_of("\n\r \t") + 1); // Trim whitespace and newlines
+            if (!input.empty()) {
+                configZip = input;
+                fetchCoords(configZip);
+                saveConfig();
+                fetchWeather();
+            }
+        }
+        pclose(pipe);
+    }
+}
+
+// WHAT: fetchCoords retrieves lat/long from US zip code using Zippopotam API.
+// WHY: Converts user-friendly zip to precise coords for weather API (teach geocoding flow).
+void fetchCoords(const std::string& zip) {
+    std::string url = "https://api.zippopotam.us/us/" + zip;
+    CURL* curl = curl_easy_init();
+    if (curl) {
+        std::string response;
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        
+        CURLcode res = curl_easy_perform(curl);
+        if (res == CURLE_OK) {
+            try {
+                auto j = nlohmann::json::parse(response);
+                if (j.contains("places") && !j["places"].empty()) {
+                    configLat = std::stod(j["places"][0]["latitude"].get<std::string>());
+                    configLon = std::stod(j["places"][0]["longitude"].get<std::string>());
+                    configZip = zip;
+                    saveConfig();
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Coords JSON error: " << e.what() << std::endl;
+            }
+        }
+        curl_easy_cleanup(curl);
+    }
+}
+
 // WHAT: fetchStocks retrieves live stock data from Finnhub API.
 // WHY: Provides real-time financial data for the stocks box, refreshing every 120 seconds.
+// Heavy comments: Null-safe JSON parsing with contains() and is_number() checks (teaches nlohmann/json safety fundamentals).
+// Finnhub API may return null for "c" (current price) or "dp" (percent change) if symbol invalid or API limit hit.
+// Without checks, std::stod() throws exceptions; with checks, set valid=false and show "N/A" in UI.
+// This prevents crashes: Invalid data doesn't break rendering, maintains zen stability.
 void fetchStocks() {
     stocks.clear();
-    std::vector<std::string> symbols = {"OKLO", "PLTR", "CNXC", "ACN"};
+    std::vector<std::string> symbols = configStocks;
     
     for (const auto& symbol : symbols) {
         CURL* curl = curl_easy_init();
@@ -121,28 +284,49 @@ void fetchStocks() {
                     auto json = nlohmann::json::parse(response);
                     Stock stock;
                     stock.symbol = symbol;
-                    stock.price = json["c"];
-                    stock.change = json["dp"];
+                    stock.valid = false;
+                    // Null-safe checks: Ensure "c" and "dp" exist and are numbers before accessing (prevents exceptions).
+                    // Finnhub returns null for invalid symbols; this teaches robust API handling.
+                    if (json.contains("c") && json["c"].is_number()) {
+                        stock.price = json["c"];
+                        stock.valid = true;
+                    }
+                    if (json.contains("dp") && json["dp"].is_number()) {
+                        stock.change = json["dp"];
+                        if (!stock.valid) stock.valid = true; // At least one valid
+                    }
                     stocks.push_back(stock);
                 } catch (const std::exception& e) {
                     std::cerr << "JSON error for " << symbol << ": " << e.what() << std::endl;
+                    // Add invalid stock to maintain UI layout
+                    Stock stock;
+                    stock.symbol = symbol;
+                    stock.valid = false;
+                    stocks.push_back(stock);
                 }
             } else {
                 std::cerr << "CURL error for " << symbol << ": " << curl_easy_strerror(res) << std::endl;
+                // Add invalid stock
+                Stock stock;
+                stock.symbol = symbol;
+                stock.valid = false;
+                stocks.push_back(stock);
             }
             curl_easy_cleanup(curl);
         }
     }
 }
 
-// WHAT: fetchWeather retrieves 6-day weather forecast from Open-Meteo API for Phoenix.
+// WHAT: fetchWeather retrieves 6-day weather forecast from Open-Meteo API using user-configured coords.
 // WHY: Provides weather data for the weather ticker, refreshing every 600 seconds (10 minutes).
 // API change: Swapped precipitation_sum (mm) for precipitation_probability_max (%) to show chance of rain instead of amount.
 // This teaches JSON field swapping fundamentals: changing API parameters for better zen dashboard relevance.
 // Why % better: Probability gives zen uncertainty insight (e.g., 15% chance) vs. exact mm which feels too precise for contemplative vibe.
 void fetchWeather() {
     weather.clear();
-    std::string url = "https://api.open-meteo.com/v1/forecast?latitude=33.4484&longitude=-112.0740&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=America%2FPhoenix&forecast_days=6";
+    std::stringstream ss;
+    ss << "https://api.open-meteo.com/v1/forecast?latitude=" << configLat << "&longitude=" << configLon << "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=America%2FPhoenix&forecast_days=6";
+    std::string url = ss.str();
     
     CURL* curl = curl_easy_init();
     if (curl) {
@@ -232,30 +416,30 @@ bool init() {
         std::cerr << "SDL init failed: " << SDL_GetError() << std::endl;
         return false;
     }
-    
+
     if (TTF_Init() == -1) {
         std::cerr << "TTF init failed: " << TTF_GetError() << std::endl;
         return false;
     }
-    
+
     if (!(IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG) & (IMG_INIT_PNG | IMG_INIT_JPG))) {
         std::cerr << "IMG init failed: " << IMG_GetError() << std::endl;
         return false;
     }
-    
-    window = SDL_CreateWindow("Zen Horizon Dashboard", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 
+
+    window = SDL_CreateWindow("Zen Horizon Dashboard", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                               WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_FULLSCREEN_DESKTOP);
     if (!window) {
         std::cerr << "Window creation failed: " << SDL_GetError() << std::endl;
         return false;
     }
-    
+
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     if (!renderer) {
         std::cerr << "Renderer creation failed: " << SDL_GetError() << std::endl;
         return false;
     }
-    
+
     titleFont = TTF_OpenFont("assets/NotoSerifJP-Regular.ttf", 72);
     textFont = TTF_OpenFont("assets/NotoSansJP-Regular.ttf", 19);
     serifFont = TTF_OpenFont("assets/NotoSerifJP-Regular.ttf", 22);
@@ -264,7 +448,7 @@ bool init() {
         std::cerr << "Font loading failed: " << TTF_GetError() << std::endl;
         return false;
     }
-    
+
     for (int i = 1; i <= 8; ++i) {
         std::string path = "assets/bg" + std::to_string(i) + ".jpg";
         SDL_Surface* surface = IMG_Load(path.c_str());
@@ -276,7 +460,7 @@ bool init() {
             std::cerr << "Image load failed: " << path << " - " << IMG_GetError() << std::endl;
         }
     }
-    
+
     for (int i = 0; i < NUM_SAKURA; ++i) {
         Particle p;
         p.x = rand() % WINDOW_WIDTH;
@@ -285,7 +469,7 @@ bool init() {
         p.vy = (rand() % 50 + 50) / 50.0f * SAKURA_SPEED;
         sakuraParticles.push_back(p);
     }
-    
+
     return true;
 }
 
@@ -401,7 +585,12 @@ void render() {
     // RGBA color (220,220,225,28) creates light smoky grey with very low opacity for subtle frosted effect.
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(renderer, 220, 220, 225, 28);
-    SDL_Rect stocksRect = {50, 150, 245, 200}; // Shrunk width by ~18% for compact look, tightened padding.
+    // Dynamic stock box width: Base 180px + 65px per symbol for flexible layout.
+    // Heavy comments: This teaches dynamic UI sizing fundamentals: width = base + per_item * count ensures box fits all symbols.
+    // Example: 3 stocks = 180 + 195 = 375px, auto-resizes on config change without restart.
+    // Teaches responsive design: UI adapts to data size, preventing overflow or wasted space.
+    int stocksWidth = 180 + 65 * configStocks.size();
+    SDL_Rect stocksRect = {50, 150, stocksWidth, 200};
     SDL_RenderFillRect(renderer, &stocksRect);
 
     int y = 160;
@@ -419,12 +608,19 @@ void render() {
 
             // Price and change in conditional color: green for positive, red for negative.
             // Use %.2f formatting for prices like real money (e.g., $59.59), teaching C++ stream precision control.
-            std::stringstream priceSS;
-            priceSS << std::fixed << std::setprecision(1) << stock.change;
-            std::stringstream priceStream;
-            priceStream << std::fixed << std::setprecision(2) << stock.price;
-            std::string pricePart = priceStream.str() + " (" + priceSS.str() + "%)";
-            SDL_Color priceColor = stock.change >= 0 ? SDL_Color{0, 255, 0, 255} : SDL_Color{255, 0, 0, 255};
+            // Null-safe rendering: If !stock.valid, show "N/A" instead of garbage values (teaches UI robustness).
+            std::string pricePart;
+            SDL_Color priceColor = {255, 255, 255, 255}; // Default white for N/A
+            if (stock.valid) {
+                std::stringstream priceSS;
+                priceSS << std::fixed << std::setprecision(1) << stock.change;
+                std::stringstream priceStream;
+                priceStream << std::fixed << std::setprecision(2) << stock.price;
+                pricePart = priceStream.str() + " (" + priceSS.str() + "%)";
+                priceColor = stock.change >= 0 ? SDL_Color{0, 255, 0, 255} : SDL_Color{255, 0, 0, 255};
+            } else {
+                pricePart = "N/A";
+            }
             SDL_Texture* priceTexture = renderText(pricePart, textFont, priceColor);
             if (priceTexture) {
                 int priceW, priceH;
@@ -461,12 +657,12 @@ void render() {
     }
 
     // Render weather ticker in lower-right with smoky background
-    if (!weather.empty()) {
-        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-        SDL_SetRenderDrawColor(renderer, 220, 220, 225, 28);
-        SDL_Rect weatherRect = {WINDOW_WIDTH - 320, WINDOW_HEIGHT - 180, 300, 160};
-        SDL_RenderFillRect(renderer, &weatherRect);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 220, 220, 225, 28);
+    SDL_Rect weatherRect = {WINDOW_WIDTH - 320, WINDOW_HEIGHT - 180, 300, 160};
+    SDL_RenderFillRect(renderer, &weatherRect);
 
+    if (!weather.empty()) {
         int y = WINDOW_HEIGHT - 170;
         for (size_t i = 0; i < weather.size(); ++i) {
             const auto& day = weather[i];
@@ -493,6 +689,26 @@ void render() {
         }
     }
 
+    // Bottom-center status text: Shows current config for transparency, teaches user about dialog keys.
+    // This teaches on-screen instructions fundamentals: display current settings and edit method for zen user guidance.
+    // Heavy comments: Builds string from configStocks (joined with spaces), configZip, static instruction.
+    // Centered horizontally with WINDOW_WIDTH/2 - w/2, bottom-aligned with y=WINDOW_HEIGHT - 30 for clean placement.
+    std::stringstream statusSS;
+    statusSS << "Current stocks: ";
+    for (size_t i = 0; i < configStocks.size(); ++i) {
+        if (i > 0) statusSS << " ";
+        statusSS << configStocks[i];
+    }
+    statusSS << " | Zip: " << configZip << " | Press S for stocks, W for weather";
+    SDL_Texture* statusTexture = renderText(statusSS.str(), textFont, {255, 255, 255, 255});
+    if (statusTexture) {
+        int w, h;
+        SDL_QueryTexture(statusTexture, NULL, NULL, &w, &h);
+        SDL_Rect dst = {WINDOW_WIDTH / 2 - w / 2, WINDOW_HEIGHT - 30, w, h};
+        SDL_RenderCopy(renderer, statusTexture, NULL, &dst);
+        SDL_DestroyTexture(statusTexture);
+    }
+
     SDL_RenderPresent(renderer);
 }
 
@@ -505,7 +721,11 @@ int main(int argc, char* argv[]) {
         cleanup();
         return 1;
     }
-    
+
+    // Load config after SDL init: Applies saved settings without global calls.
+    // This teaches proper initialization order: load config only after environment is ready.
+    loadConfig();
+
     fetchStocks();
     fetchWeather();
 
@@ -524,6 +744,16 @@ int main(int argc, char* argv[]) {
                 else if (event.key.keysym.sym == SDLK_F11) {
                     isFullscreen = !isFullscreen;
                     SDL_SetWindowFullscreen(window, isFullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                }
+                else if (event.key.keysym.sym == SDLK_s) {
+                    // Press S: Spawn zenity dialog for stocks, teaching Unix child process integration.
+                    // Heavy comments: Calls editStocks() which uses popen() to run zenity asynchronously, reads output, parses, saves, refreshes.
+                    editStocks();
+                }
+                else if (event.key.keysym.sym == SDLK_w) {
+                    // Press W: Spawn zenity dialog for weather zip, teaching native dialog fundamentals.
+                    // Heavy comments: editWeather() handles geocoding flow: zip input → coords fetch → weather refresh.
+                    editWeather();
                 }
             }
         }
