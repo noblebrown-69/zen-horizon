@@ -1,0 +1,19 @@
+# Compiled binaries
+zen-horizon
+
+# Object files
+*.o
+
+# Temporary files
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Build artifacts
+build/
