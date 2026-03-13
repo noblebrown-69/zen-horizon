@@ -1,18 +1,16 @@
 #!/bin/bash
-# ZenHorizon commit helper — fully automatic, SSH, zero passwords forever
-# Usage: ./commit.sh "your message here"
+# ZenHorizon commit helper — 100% automatic forever
+# Just type: ./commit.sh "your message here"
 
 if [ -z "$1" ]; then
-  echo "Usage: ./commit.sh \"your commit message\""
+  echo "Usage: ./commit.sh \"your message\""
   exit 1
 fi
 
-echo "🔄 Pulling latest..."
-git pull origin main --rebase
-
+git pull origin main
 git add .
-git commit -m "$1" || echo "✓ Nothing new to commit"
+git commit -m "$1" || echo "✓ Already up to date"
 git push
 
 echo "✅ Committed & pushed: $1"
-echo "   (Dropbox syncing to weak laptop automatically)"
+echo "   (Dropbox is already syncing to your weak laptop)"
