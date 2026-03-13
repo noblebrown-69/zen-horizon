@@ -343,14 +343,26 @@ void fetchWeather() {
                 auto json = nlohmann::json::parse(response);
                 auto& daily = json["daily"];
                 
-                // Get day names for the next 6 days
-                std::vector<std::string> dayNames = {"Today", "Tomorrow", "Wed", "Thu", "Fri", "Sat"};
+                // OLD BROKEN WAY: Static dayNames = {"Today", "Tomorrow", "Wed", "Thu", "Fri", "Sat"};
+                // This was hardcoded and didn't account for the actual day of the week.
+                // For example, if today is Friday (tm_wday=5), it would show Today, Tomorrow, Wed, Thu, Fri, Sat
+                // But Tomorrow should be Saturday, then Sunday, Monday, etc.
+                // This broke the forecast labels, making them incorrect for most days.
+                // NEW WAY: Use real date calculation with time_t and localtime.
+                // std::tm fundamentals: tm_wday gives day of week, 0=Sunday, 1=Monday, ..., 6=Saturday.
+                // Date math: To get future weekdays, offset from current tm_wday.
+                // For i=0: Today
+                // i=1: Tomorrow
+                // i>=2: actual weekday names using (tm_wday + i) % 7
+                const char* weekdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
                 time_t current_time = ::time(nullptr);
                 tm* tm_now = localtime(&current_time);
 
                 for (size_t i = 0; i < 6 && i < daily["time"].size(); ++i) {
                     WeatherDay day;
-                    day.dayName = dayNames[i];
+                    if (i == 0) day.dayName = "Today";
+                    else if (i == 1) day.dayName = "Tomorrow";
+                    else day.dayName = weekdays[(tm_now->tm_wday + i) % 7];
                     day.maxTemp = daily["temperature_2m_max"][i];
                     day.minTemp = daily["temperature_2m_min"][i];
                     day.precip = daily["precipitation_probability_max"][i];
