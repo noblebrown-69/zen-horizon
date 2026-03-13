@@ -9,6 +9,7 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <ctime>
 #include <cmath>
 #include "json.hpp"
 
@@ -21,6 +22,7 @@ const int FRAME_DELAY = 1000 / FPS;
 const std::string API_KEY = "d6kj03pr01qg51f446g0d6kj03pr01qg51f446gg";
 const std::string FINNHUB_BASE_URL = "https://finnhub.io/api/v1/quote?symbol=";
 const int STOCK_REFRESH_INTERVAL = 120000; // 120 seconds
+const int WEATHER_REFRESH_INTERVAL = 600000; // 10 minutes
 const int QUOTE_ROTATE_INTERVAL = 1800000; // 30 minutes
 const int BG_CYCLE_INTERVAL = 300000; // 5 minutes
 const int NUM_SAKURA = 65;
@@ -50,6 +52,15 @@ struct Stock {
     double change;
 };
 
+// WHAT: WeatherDay struct holds daily weather data.
+// WHY: Stores parsed weather info for display in the ticker.
+struct WeatherDay {
+    std::string dayName;
+    int maxTemp;
+    int minTemp;
+    double precip;
+};
+
 // WHAT: Particle struct represents a sakura particle with position and velocity.
 // WHY: Allows for realistic falling motion of the 65 sakura particles.
 struct Particle {
@@ -64,14 +75,17 @@ SDL_Renderer* renderer = nullptr;
 TTF_Font* titleFont = nullptr;
 TTF_Font* textFont = nullptr;
 TTF_Font* serifFont = nullptr;
+TTF_Font* clockFont = nullptr;
 std::vector<SDL_Texture*> bgTextures;
 std::vector<Stock> stocks;
+std::vector<WeatherDay> weather;
 std::vector<Particle> sakuraParticles;
 int currentQuoteIndex = 0;
 int currentBgIndex = 0;
 Uint32 lastStockUpdate = 0;
 Uint32 lastQuoteRotate = 0;
 Uint32 lastBgCycle = 0;
+Uint32 lastWeatherUpdate = 0;
 bool isFullscreen = true;
 float bgAlpha = 1.0f;
 int bgFadeDirection = 0;
@@ -118,6 +132,53 @@ void fetchStocks() {
             }
             curl_easy_cleanup(curl);
         }
+    }
+}
+
+// WHAT: fetchWeather retrieves 6-day weather forecast from Open-Meteo API for Phoenix.
+// WHY: Provides weather data for the weather ticker, refreshing every 600 seconds (10 minutes).
+// API change: Swapped precipitation_sum (mm) for precipitation_probability_max (%) to show chance of rain instead of amount.
+// This teaches JSON field swapping fundamentals: changing API parameters for better zen dashboard relevance.
+// Why % better: Probability gives zen uncertainty insight (e.g., 15% chance) vs. exact mm which feels too precise for contemplative vibe.
+void fetchWeather() {
+    weather.clear();
+    std::string url = "https://api.open-meteo.com/v1/forecast?latitude=33.4484&longitude=-112.0740&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=America%2FPhoenix&forecast_days=6";
+    
+    CURL* curl = curl_easy_init();
+    if (curl) {
+        std::string response;
+        
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        
+        CURLcode res = curl_easy_perform(curl);
+        if (res == CURLE_OK) {
+            try {
+                auto json = nlohmann::json::parse(response);
+                auto& daily = json["daily"];
+                
+                // Get day names for the next 6 days
+                std::vector<std::string> dayNames = {"Today", "Tomorrow", "Wed", "Thu", "Fri", "Sat"};
+                time_t current_time = ::time(nullptr);
+                tm* tm_now = localtime(&current_time);
+
+                for (size_t i = 0; i < 6 && i < daily["time"].size(); ++i) {
+                    WeatherDay day;
+                    day.dayName = dayNames[i];
+                    day.maxTemp = daily["temperature_2m_max"][i];
+                    day.minTemp = daily["temperature_2m_min"][i];
+                    day.precip = daily["precipitation_probability_max"][i];
+                    weather.push_back(day);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Weather JSON error: " << e.what() << std::endl;
+            }
+        } else {
+            std::cerr << "Weather CURL error: " << curl_easy_strerror(res) << std::endl;
+        }
+        curl_easy_cleanup(curl);
     }
 }
 
@@ -198,7 +259,8 @@ bool init() {
     titleFont = TTF_OpenFont("assets/NotoSerifJP-Regular.ttf", 72);
     textFont = TTF_OpenFont("assets/NotoSansJP-Regular.ttf", 19);
     serifFont = TTF_OpenFont("assets/NotoSerifJP-Regular.ttf", 22);
-    if (!titleFont || !textFont || !serifFont) {
+    clockFont = TTF_OpenFont("assets/NotoSerifJP-Regular.ttf", 24);
+    if (!titleFont || !textFont || !serifFont || !clockFont) {
         std::cerr << "Font loading failed: " << TTF_GetError() << std::endl;
         return false;
     }
@@ -234,6 +296,7 @@ void cleanup() {
     if (titleFont) TTF_CloseFont(titleFont);
     if (textFont) TTF_CloseFont(textFont);
     if (serifFont) TTF_CloseFont(serifFont);
+    if (clockFont) TTF_CloseFont(clockFont);
     if (renderer) SDL_DestroyRenderer(renderer);
     if (window) SDL_DestroyWindow(window);
     TTF_Quit();
@@ -250,6 +313,11 @@ void update(Uint32 deltaTime) {
     if (currentTime - lastStockUpdate > STOCK_REFRESH_INTERVAL) {
         fetchStocks();
         lastStockUpdate = currentTime;
+    }
+    
+    if (currentTime - lastWeatherUpdate > WEATHER_REFRESH_INTERVAL) {
+        fetchWeather();
+        lastWeatherUpdate = currentTime;
     }
     
     if (currentTime - lastQuoteRotate > QUOTE_ROTATE_INTERVAL) {
@@ -310,7 +378,25 @@ void render() {
         SDL_RenderCopy(renderer, titleTexture, NULL, &dst);
         SDL_DestroyTexture(titleTexture);
     }
-    
+
+    // Clock repositioning: Moved from centered below title to lower-left corner at x=50, y=90% of screen height.
+    // This teaches SDL positioning fundamentals: x=50 provides left margin, y=WINDOW_HEIGHT * 0.9 places it near bottom.
+    // White-only color (255,255,255) ensures steady, readable text without glow/pulse for clean zen aesthetic.
+    // No background box needed — clean white text overlays the art seamlessly.
+    time_t current_time = ::time(nullptr);
+    tm* tm_now = localtime(&current_time);
+    char timeStr[100];
+    strftime(timeStr, sizeof(timeStr), "%Y年%m月%d日 %H:%M:%S", tm_now);
+    SDL_Color clockColor = {255, 255, 255, 255}; // Steady pure white, no glow
+    SDL_Texture* clockTexture = renderText(timeStr, clockFont, clockColor);
+    if (clockTexture) {
+        int w, h;
+        SDL_QueryTexture(clockTexture, NULL, NULL, &w, &h);
+        SDL_Rect dst = {50, (int)(WINDOW_HEIGHT * 0.9), w, h}; // Lower-left positioning
+        SDL_RenderCopy(renderer, clockTexture, NULL, &dst);
+        SDL_DestroyTexture(clockTexture);
+    }
+
     // Set blend mode for semi-transparent rendering, teaching SDL fundamentals: BLENDMODE_BLEND enables alpha compositing.
     // RGBA color (220,220,225,28) creates light smoky grey with very low opacity for subtle frosted effect.
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
@@ -373,7 +459,40 @@ void render() {
         SDL_RenderCopy(renderer, quoteTexture, NULL, &dst);
         SDL_DestroyTexture(quoteTexture);
     }
-    
+
+    // Render weather ticker in lower-right with smoky background
+    if (!weather.empty()) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 220, 220, 225, 28);
+        SDL_Rect weatherRect = {WINDOW_WIDTH - 320, WINDOW_HEIGHT - 180, 300, 160};
+        SDL_RenderFillRect(renderer, &weatherRect);
+
+        int y = WINDOW_HEIGHT - 170;
+        for (size_t i = 0; i < weather.size(); ++i) {
+            const auto& day = weather[i];
+            // C-to-F conversion: Fahrenheit = (Celsius * 9/5) + 32, rounded to whole number with %.0f.
+            // This teaches simple math fundamentals: linear temperature conversion formula, floating-point arithmetic, rounding for display.
+            // Example: 32°C = (32 * 9/5) + 32 = 57.6 + 32 = 89.6 → 90°F with round().
+            int fMax = round((day.maxTemp * 9.0 / 5.0) + 32.0);
+            int fMin = round((day.minTemp * 9.0 / 5.0) + 32.0);
+            std::stringstream ss;
+            ss << day.dayName << ": " << fMax << "°";
+            if (i == 0) {
+                ss << "/" << fMin << "°";
+            }
+            ss << " • " << std::fixed << std::setprecision(0) << day.precip << "%";
+            SDL_Texture* weatherTexture = renderText(ss.str(), textFont, {255, 255, 255, 255});
+            if (weatherTexture) {
+                int w, h;
+                SDL_QueryTexture(weatherTexture, NULL, NULL, &w, &h);
+                SDL_Rect dst = {WINDOW_WIDTH - 310, y, w, h};
+                SDL_RenderCopy(renderer, weatherTexture, NULL, &dst);
+                SDL_DestroyTexture(weatherTexture);
+            }
+            y += 24;
+        }
+    }
+
     SDL_RenderPresent(renderer);
 }
 
@@ -388,7 +507,8 @@ int main(int argc, char* argv[]) {
     }
     
     fetchStocks();
-    
+    fetchWeather();
+
     Uint32 frameStart;
     int frameTime;
     bool running = true;
