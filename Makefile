@@ -1,6 +1,6 @@
 CXX = g++
-CXXFLAGS = -O2 -std=c++17 -Wall -Wextra
-LDFLAGS = `sdl2-config --libs` -lSDL2_ttf -lSDL2_image -lcurl -lm
+CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -pthread
+LDFLAGS = `sdl2-config --libs` -lSDL2_ttf -lSDL2_image -lcurl -lm -pthread
 INCLUDES = `sdl2-config --cflags`
 
 TARGET = zen-horizon

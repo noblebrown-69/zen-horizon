@@ -7,5 +7,14 @@
         "PLTR",
         "OKLO"
     ],
-    "zip": "85022"
+    "zip": "85022",
+    "fullscreen": true,
+    "fps": 20,
+    "stock_refresh_sec": 120,
+    "weather_refresh_sec": 600,
+    "quote_rotate_sec": 1800,
+    "bg_cycle_sec": 300,
+    "llm_health_url": "http://127.0.0.1:8080/health",
+    "llm_refresh_sec": 30,
+    "timezone": "auto"
 }

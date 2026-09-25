@@ -17,3 +17,9 @@ Thumbs.db
 
 # Build artifacts
 build/
+
+# API secrets — never commit
+finnhub.key
+.env
+.env.*
+*.key
