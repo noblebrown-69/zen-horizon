@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.3
+Name=Zen Horizon
+GenericName=Idle Dashboard
+Comment=Quiet always-on dashboard
+Exec=/home/USER/zen-horizon/zen-horizon
+Path=/home/USER/zen-horizon
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=4
